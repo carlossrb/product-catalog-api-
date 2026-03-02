@@ -4,7 +4,7 @@ API de catálogo de produtos: o core que alimenta vendas, marketplace e logísti
 
 ## Stack
 
-NestJS 11, TypeORM, PostgreSQL 17, CQRS, BullMQ + Redis, Winston, Scalar (docs), Vitest, Docker Compose.
+NestJS 11, TypeORM, PostgreSQL 17, CQRS, BullMQ + Redis, Winston, Scalar (swaggerdocs), Vitest, Docker Compose.
 
 ---
 
