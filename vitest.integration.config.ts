@@ -5,8 +5,8 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
-    include: ["src/**/*.spec.ts"],
-    exclude: ["node_modules", "dist", "src/**/*.integration.spec.ts"],
+    include: ["src/**/*.integration.spec.ts"],
+    exclude: ["node_modules", "dist"],
   },
   plugins: [
     swc.vite({

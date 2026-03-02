@@ -161,7 +161,7 @@ describe("Product Lifecycle Integration", () => {
     store.attributes.clear();
   });
 
-  it("deve completar o fluxo: criar → adicionar categoria → adicionar atributo → ativar → arquivar", async () => {
+  it("deve completar o fluxo: criar >> adicionar categoria >> adicionar atributo >> ativar >> arquivar", async () => {
     const created = await createHandler.execute(
       new CreateProductCommand("Camiseta", "Algodão"),
     );

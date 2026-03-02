@@ -94,7 +94,7 @@ export class ProductsController {
   }
 
   @Patch(":id/activate")
-  @ApiOperation({ summary: "Ativar produto (DRAFT → ACTIVE)" })
+  @ApiOperation({ summary: "Ativar produto (DRAFT >> ACTIVE)" })
   @ApiResponse({ status: 200, description: "Produto ativado" })
   @ApiResponse({ status: 400, description: "Pré-condições não atendidas" })
   async activate(@Param("id", ParseUUIDPipe) id: string): Promise<Product> {
