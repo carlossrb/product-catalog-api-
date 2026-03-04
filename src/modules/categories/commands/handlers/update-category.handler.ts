@@ -6,30 +6,30 @@ import {
   Logger,
   NotFoundException,
 } from "@nestjs/common";
-import { InjectRepository } from "@nestjs/typeorm";
-import { Not, Repository } from "typeorm";
 import { CACHE_MANAGER, Cache } from "@nestjs/cache-manager";
 import { UpdateCategoryCommand } from "../impl/update-category.command";
 import { Category } from "../../entities/category.entity";
 import { CategoryUpdatedEvent } from "../../events/category.events";
 import { CacheKeys } from "../../../../common/cache/cache-keys";
+import {
+  CATEGORY_REPOSITORY,
+  CategoryRepositoryPort,
+} from "../../ports/category.repository.port";
 
 @CommandHandler(UpdateCategoryCommand)
 export class UpdateCategoryHandler implements ICommandHandler<UpdateCategoryCommand> {
   private readonly logger = new Logger(UpdateCategoryHandler.name);
 
   constructor(
-    @InjectRepository(Category)
-    private readonly categoryRepository: Repository<Category>,
+    @Inject(CATEGORY_REPOSITORY)
+    private readonly categories: CategoryRepositoryPort,
     private readonly eventBus: EventBus,
     @Inject(CACHE_MANAGER)
     private readonly cache: Cache,
   ) {}
 
   async execute(command: UpdateCategoryCommand): Promise<Category> {
-    const category = await this.categoryRepository.findOne({
-      where: { id: command.id },
-    });
+    const category = await this.categories.findById(command.id);
 
     if (!category) {
       throw new NotFoundException(`Category ${command.id} not found`);
@@ -38,9 +38,10 @@ export class UpdateCategoryHandler implements ICommandHandler<UpdateCategoryComm
     const changes: Record<string, unknown> = {};
 
     if (command.name !== undefined && command.name !== category.name) {
-      const duplicate = await this.categoryRepository.findOne({
-        where: { name: command.name, id: Not(command.id) },
-      });
+      const duplicate = await this.categories.findByNameExcluding(
+        command.name,
+        command.id,
+      );
 
       if (duplicate) {
         throw new ConflictException(
@@ -58,9 +59,7 @@ export class UpdateCategoryHandler implements ICommandHandler<UpdateCategoryComm
       }
 
       if (command.parentId !== null) {
-        const parent = await this.categoryRepository.findOne({
-          where: { id: command.parentId },
-        });
+        const parent = await this.categories.findById(command.parentId);
 
         if (!parent) {
           throw new NotFoundException(
@@ -77,14 +76,14 @@ export class UpdateCategoryHandler implements ICommandHandler<UpdateCategoryComm
       return category;
     }
 
-    const saved = await this.categoryRepository.save(category);
+    const saved = await this.categories.save(category);
 
     await this.cache.del(CacheKeys.category(saved.id));
     const currentVersion =
       (await this.cache.get<number>(CacheKeys.categoryListVersion())) ?? 0;
     await this.cache.set(CacheKeys.categoryListVersion(), currentVersion + 1);
 
-    this.logger.log(`Category updated: ${saved.id}`);
+    this.logger.log({ action: "updated", categoryId: saved.id, changes });
     this.eventBus.publish(new CategoryUpdatedEvent(saved.id, changes));
 
     return saved;

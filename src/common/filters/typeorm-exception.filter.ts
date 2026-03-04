@@ -28,13 +28,18 @@ export class TypeormExceptionFilter implements ExceptionFilter {
 
     const { status, message } = this.resolveError(exception);
 
-    this.logger.warn(
-      `TypeORM error on ${request.method} ${request.url}: ${exception.message}`,
-    );
+    this.logger.warn({
+      message: "TypeORM error",
+      method: request.method,
+      path: request.url,
+      error: exception.message,
+      requestId: request.headers["x-request-id"],
+    });
 
     response.status(status).json({
       statusCode: status,
       message,
+      requestId: request.headers["x-request-id"],
       timestamp: new Date().toISOString(),
       path: request.url,
     });

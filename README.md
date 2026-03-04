@@ -31,7 +31,9 @@ pnpm start:dev
 Testes:
 
 ```bash
-pnpm test
+pnpm test              # unitários
+pnpm test:integration  # integração
+pnpm test:all          # todos
 ```
 
 ---
@@ -83,9 +85,17 @@ A documentação completa com exemplos de request/response está no Scalar (`/do
 
 ## Decisões e trade-offs
 
-### Por que CQRS?
+### Arquitetura: domínio, ports e handlers
 
-O domínio tem regras de negócio bem definidas: transições de status, pré-condições pra ativação, restrições em produto arquivado. Com CQRS, cada regra vive num handler isolado — fácil de testar, fácil de encontrar, fácil de evoluir
+As regras de negócio vivem na entidade `Product` — métodos como `activate()`, `archive()`, `applyUpdate()`, `addCategory()`, `assertModifiable()` encapsulam pré-condições e transições de estado. Os command handlers orquestram (buscar, chamar método de domínio, persistir, publicar evento) mas não decidem regras.
+
+Os handlers dependem de **interfaces de repositório** (`ProductRepositoryPort`, `CategoryRepositoryPort`, `ProductAttributeRepositoryPort`) e não do `Repository<T>` do TypeORM diretamente. As implementações concretas (`TypeOrmProductRepository`, etc.) ficam em `infrastructure/` e são injetadas via DI nos módulos. Trocar o ORM ou testar com in-memory não exige mexer nos handlers.
+
+**Trade-off consciente:** as entidades ainda carregam decorators do TypeORM (`@Entity`, `@Column`, etc.), ou seja, não há um modelo de domínio 100% puro separado de um modelo de persistência. Criar essa separação exigiria uma camada de mapeamento (domain <> persistence) que, pra esse escopo, adicionaria complexidade sem ganho proporcional. Se o domínio crescer a ponto de divergir da modelagem relacional, aí justifica.
+
+### CQRS
+
+O domínio tem regras de negócio bem definidas: transições de status, pré-condições pra ativação, restrições em produto arquivado. Com CQRS, cada regra vive num handler isolado — fácil de testar, fácil de encontrar, fácil de evoluir.
 
 Na prática: pra adicionar uma nova regra de negócio, crio um Command + Handler novo sem mexer em nada que já funciona. Cada handler publica um evento de domínio via `EventBus`, que o módulo de auditoria consome de forma desacoplada.
 
@@ -99,17 +109,15 @@ Redis serve dois propósitos aqui: **cache de leitura** e **fila de mensagens** 
 
 **Filas (BullMQ):** eventos de auditoria são enfileirados no Redis via BullMQ e processados de forma assíncrona. Retry com backoff exponencial (1s >> 2s >> 4s), dead-letter queue, e o `@nestjs/bullmq` é módulo oficial do NestJS.
 
-**Por que não Kafka/RabbitMQ/SQS?** Kafka é projetado pra milhões de eventos/segundo com partitioning e replay. Aqui são dezenas de eventos de auditoria por minuto. RabbitMQ é robusto mas adicionaria mais um serviço pra gerenciar. SQS é AWS-only e difícil de rodar local. Redis já estava no docker-compose pro cache, então BullMQ roda em cima dele sem nenhuma infraestrutura nova. Fica aquele dilema entre `Pragmatismo vs purismo`.
+**Por que não Kafka/RabbitMQ/SQS?** Kafka é projetado pra milhões de eventos/segundo com partitioning e replay. Aqui são dezenas de eventos de auditoria por minuto. RabbitMQ é robusto mas adicionaria mais um serviço pra gerenciar. SQS é AWS-only e difícil de rodar local. Redis já estava no docker-compose pro cache, então BullMQ roda em cima dele sem infraestrutura nova. Pragmatismo > purismo.
 
-O trade-off: Redis não é um broker "real" de mensageria. Se o Redis cair, os eventos em memória podem se perder. Pra auditoria interna, onde o retry cobre a maioria dos cenários de falha, é aceitável. Se a auditoria fosse um requisito regulatório crítico, aí sim valeria um RabbitMQ com persistência em disco.
+### Por que não Outbox Pattern?
 
-**Fluxo de auditoria:**
+Hoje o `save` no banco e o `eventBus.publish` acontecem em sequência, sem transação compartilhada. Se o publish falhar depois do save, o evento de auditoria se perde. O Outbox Pattern resolveria isso: salvar o evento numa tabela `outbox` na mesma transação do comando, e um worker separado publicaria.
 
-```
-CommandHandler >> EventBus >> AuditEventsHandler >> AuditService >> BullMQ >> AuditProcessor >> banco
-```
+Não implementei porque: (1) a auditoria aqui é interna, não regulatória: perder um evento ocasional não gera consequência crítica; (2) o retry do BullMQ cobre a maioria dos cenários de falha transitória; (3) o Outbox adicionaria um cron/poller, uma tabela auxiliar e lógica de idempotência nos consumers, complexidade desproporcional pro escopo.
 
-Jobs configurados com 3 tentativas (backoff 1s >> 2s >> 4s).
+Se a auditoria virar requisito regulatório, o caminho seria: transação TypeORM com `save` + `outbox insert`, e um scheduler (`@nestjs/schedule`) consumindo a tabela outbox e publicando no BullMQ.
 
 ### TypeORM
 
@@ -121,9 +129,25 @@ Modelagem:
 - Category >> Category: auto-referência pra hierarquia simples (parentId)
 - AuditLog: tabela independente, sem FKs: log é registro histórico, não referência viva
 
-### Logs
+### Qualidade: erros padronizados e observabilidade
 
-Winston com output JSON. Cada handler loga o que fez e com qual entidade. Em produção, esse JSON vai direto pra Datadog/ELK/CloudWatch sem precisar de parser.
+**RequestId:** toda request recebe um UUID via middleware (`x-request-id`). Se o client já envia o header, ele é preservado. Todas as respostas de erro incluem o `requestId`, facilitando correlação de logs em produção.
+
+**Logs estruturados:** handlers logam objetos JSON com contexto (`{ action, productId, changes }`) em vez de strings interpoladas. Em produção, isso vai direto pro Datadog/ELK/CloudWatch sem precisar de parser ou regex.
+
+**Validação:** todos os params de rota usam `ParseUUIDPipe`, todos os bodies passam por DTOs com `class-validator`. Filtros de exceção globais (`GlobalExceptionFilter`, `HttpExceptionFilter`, `TypeormExceptionFilter`) garantem resposta padronizada com `statusCode`, `message`, `requestId`, `timestamp` e `path`.
+
+---
+
+## Testes
+
+73 testes, separados em dois comandos:
+
+- `pnpm test` — 66 testes unitários: cada command/query handler testado isoladamente com mocks dos ports de repositório. Cobrem cenários de sucesso, rejeição por regra de negócio (ativação sem categoria, alteração em produto arquivado, nome duplicado, etc.) e edge cases (nenhuma alteração, entidade não encontrada).
+
+- `pnpm test:integration` — 7 testes de integração: fluxo completo de ciclo de vida do produto (criar >> adicionar categoria >> adicionar atributo >> ativar >> arquivar) e todas as rejeições esperadas após arquivamento.
+
+Os mocks nos testes unitários implementam as interfaces de port (`ProductRepositoryPort`, `CategoryRepositoryPort`), não o `Repository<T>` do TypeORM — ou seja, os testes validam lógica de negócio sem nenhum acoplamento com ORM.
 
 ---
 

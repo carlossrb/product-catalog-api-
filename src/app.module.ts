@@ -1,5 +1,6 @@
-import { Module, Scope } from "@nestjs/common";
+import { MiddlewareConsumer, Module, NestModule, Scope } from "@nestjs/common";
 import { APP_FILTER, APP_GUARD } from "@nestjs/core";
+import { RequestIdMiddleware } from "./common/middleware/request-id.middleware";
 import { ConfigModule, ConfigService } from "@nestjs/config";
 import { CacheModule } from "@nestjs/cache-manager";
 import { TypeOrmModule } from "@nestjs/typeorm";
@@ -92,4 +93,8 @@ import { AuditModule } from "./modules/audit/audit.module";
     },
   ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(RequestIdMiddleware).forRoutes("*");
+  }
+}

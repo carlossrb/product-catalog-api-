@@ -1,48 +1,46 @@
 import { Inject } from "@nestjs/common";
 import { CommandHandler, EventBus, ICommandHandler } from "@nestjs/cqrs";
-import { BadRequestException, Logger, NotFoundException } from "@nestjs/common";
-import { InjectRepository } from "@nestjs/typeorm";
-import { Repository } from "typeorm";
+import { Logger, NotFoundException } from "@nestjs/common";
 import { CACHE_MANAGER, Cache } from "@nestjs/cache-manager";
 import { RemoveAttributeCommand } from "../impl/remove-attribute.command";
-import { Product } from "../../entities/product.entity";
-import { ProductAttribute } from "../../entities/product-attribute.entity";
-import { ProductStatus } from "../../entities/product-status.enum";
 import { AttributeRemovedEvent } from "../../events/product.events";
 import { CacheKeys } from "../../../../common/cache/cache-keys";
+import {
+  PRODUCT_REPOSITORY,
+  ProductRepositoryPort,
+} from "../../ports/product.repository.port";
+import {
+  PRODUCT_ATTRIBUTE_REPOSITORY,
+  ProductAttributeRepositoryPort,
+} from "../../ports/product-attribute.repository.port";
 
 @CommandHandler(RemoveAttributeCommand)
 export class RemoveAttributeHandler implements ICommandHandler<RemoveAttributeCommand> {
   private readonly logger = new Logger(RemoveAttributeHandler.name);
 
   constructor(
-    @InjectRepository(Product)
-    private readonly productRepository: Repository<Product>,
-    @InjectRepository(ProductAttribute)
-    private readonly attributeRepository: Repository<ProductAttribute>,
+    @Inject(PRODUCT_REPOSITORY)
+    private readonly products: ProductRepositoryPort,
+    @Inject(PRODUCT_ATTRIBUTE_REPOSITORY)
+    private readonly attributes: ProductAttributeRepositoryPort,
     private readonly eventBus: EventBus,
     @Inject(CACHE_MANAGER)
     private readonly cache: Cache,
   ) {}
 
   async execute(command: RemoveAttributeCommand): Promise<void> {
-    const product = await this.productRepository.findOne({
-      where: { id: command.productId },
-    });
+    const product = await this.products.findById(command.productId);
 
     if (!product) {
       throw new NotFoundException(`Product ${command.productId} not found`);
     }
 
-    if (product.status === ProductStatus.ARCHIVED) {
-      throw new BadRequestException(
-        "Cannot modify attributes of an archived product",
-      );
-    }
+    product.assertModifiable();
 
-    const attribute = await this.attributeRepository.findOne({
-      where: { id: command.attributeId, productId: command.productId },
-    });
+    const attribute = await this.attributes.findByProductAndId(
+      command.productId,
+      command.attributeId,
+    );
 
     if (!attribute) {
       throw new NotFoundException(
@@ -50,13 +48,16 @@ export class RemoveAttributeHandler implements ICommandHandler<RemoveAttributeCo
       );
     }
 
-    await this.attributeRepository.remove(attribute);
+    await this.attributes.remove(attribute);
 
     await this.cache.del(CacheKeys.product(command.productId));
 
-    this.logger.log(
-      `Attribute "${attribute.key}" removed from product ${product.id}`,
-    );
+    this.logger.log({
+      action: "attribute_removed",
+      productId: product.id,
+      attributeId: command.attributeId,
+      key: attribute.key,
+    });
     this.eventBus.publish(
       new AttributeRemovedEvent(product.id, command.attributeId, attribute.key),
     );

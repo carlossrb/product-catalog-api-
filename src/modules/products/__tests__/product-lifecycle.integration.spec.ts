@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EventBus } from "@nestjs/cqrs";
 import { Cache } from "@nestjs/cache-manager";
 import { BadRequestException } from "@nestjs/common";
-import { Repository } from "typeorm";
 import { CreateProductHandler } from "../commands/handlers/create-product.handler";
 import { CreateProductCommand } from "../commands/impl/create-product.command";
 import { UpdateProductHandler } from "../commands/handlers/update-product.handler";
@@ -20,6 +19,9 @@ import { Product } from "../entities/product.entity";
 import { ProductAttribute } from "../entities/product-attribute.entity";
 import { ProductStatus } from "../entities/product-status.enum";
 import { Category } from "../../categories/entities/category.entity";
+import { ProductRepositoryPort } from "../ports/product.repository.port";
+import { ProductAttributeRepositoryPort } from "../ports/product-attribute.repository.port";
+import { CategoryRepositoryPort } from "../../categories/ports/category.repository.port";
 
 interface StoredProduct {
   id: string;
@@ -40,49 +42,49 @@ const store: {
   attributes: new Map(),
 };
 
-const productRepo = {
-  create: vi.fn((data: Partial<Product>) => ({
-    id: `prod-${Date.now()}`,
-    status: ProductStatus.DRAFT,
-    categories: [],
-    attributes: [],
-    createdAt: new Date(),
-    updatedAt: new Date(),
-    ...data,
-  })),
-  save: vi.fn((product: StoredProduct) => {
+const productRepo: ProductRepositoryPort = {
+  create: vi.fn((data: { name: string; description: string | null }) => {
+    const p = Object.assign(new Product(), {
+      id: `prod-${Date.now()}`,
+      status: ProductStatus.DRAFT,
+      categories: [] as Category[],
+      attributes: [] as ProductAttribute[],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...data,
+    });
+    return p;
+  }),
+  save: vi.fn((product: Product) => {
     store.products.set(product.id, { ...product });
     const attrs = [...store.attributes.values()].filter(
       (a) => a.productId === product.id,
     );
-    return Promise.resolve({ ...product, attributes: attrs });
+    return Promise.resolve(
+      Object.assign(new Product(), { ...product, attributes: attrs }),
+    );
   }),
-  findOne: vi.fn(
-    ({ where }: { where: Record<string, unknown>; relations?: string[] }) => {
-      if (where.name && where.id) {
-        for (const [, p] of store.products) {
-          if (
-            p.name === where.name &&
-            p.id !== (where.id as { _value: string })._value
-          ) {
-            return Promise.resolve(p);
-          }
-        }
-        return Promise.resolve(null);
-      }
-      const product = store.products.get(where.id as string);
-      if (!product) return Promise.resolve(null);
-      const attrs = [...store.attributes.values()].filter(
-        (a) => a.productId === product.id,
-      );
-      return Promise.resolve({ ...product, attributes: attrs });
-    },
-  ),
-} as unknown as Repository<Product>;
+  findById: vi.fn((id: string) => {
+    const product = store.products.get(id);
+    if (!product) return Promise.resolve(null);
+    const attrs = [...store.attributes.values()].filter(
+      (a) => a.productId === product.id,
+    );
+    return Promise.resolve(
+      Object.assign(new Product(), { ...product, attributes: attrs }),
+    );
+  }),
+  findDuplicateName: vi.fn(() => {
+    return Promise.resolve(null);
+  }),
+  findAll: vi.fn(() => Promise.resolve([[], 0] as [Product[], number])),
+};
 
-const categoryRepo = {
-  findOne: vi.fn(({ where }: { where: Record<string, unknown> }) => {
-    if (where.id === "cat-1") {
+const categoryRepo: CategoryRepositoryPort = {
+  create: vi.fn(),
+  save: vi.fn(),
+  findById: vi.fn((id: string) => {
+    if (id === "cat-1") {
       return Promise.resolve({
         id: "cat-1",
         name: "Vestuário",
@@ -91,24 +93,30 @@ const categoryRepo = {
     }
     return Promise.resolve(null);
   }),
-} as unknown as Repository<Category>;
+  findByName: vi.fn(),
+  findByNameExcluding: vi.fn(),
+  findAll: vi.fn(),
+};
 
-const attrRepo = {
-  create: vi.fn((data: Partial<ProductAttribute>) => ({
-    id: `attr-${Date.now()}`,
-    ...data,
-  })),
+const attrRepo: ProductAttributeRepositoryPort = {
+  create: vi.fn(
+    (data: { productId: string; key: string; value: string }) =>
+      ({
+        id: `attr-${Date.now()}`,
+        ...data,
+      }) as ProductAttribute,
+  ),
   save: vi.fn((attr: ProductAttribute) => {
     store.attributes.set(attr.id, { ...attr });
     return Promise.resolve(attr);
   }),
-  findOne: vi.fn(({ where }: { where: Record<string, unknown> }) => {
-    if (where.id) {
-      const attr = store.attributes.get(where.id as string);
-      return Promise.resolve(attr ?? null);
-    }
+  findByProductAndId: vi.fn((_productId: string, attributeId: string) => {
+    const attr = store.attributes.get(attributeId);
+    return Promise.resolve(attr ?? null);
+  }),
+  findByProductAndKey: vi.fn((productId: string, key: string) => {
     for (const [, a] of store.attributes) {
-      if (a.productId === where.productId && a.key === where.key) {
+      if (a.productId === productId && a.key === key) {
         return Promise.resolve(a);
       }
     }
@@ -118,7 +126,7 @@ const attrRepo = {
     store.attributes.delete(attr.id);
     return Promise.resolve(attr);
   }),
-} as unknown as Repository<ProductAttribute>;
+};
 
 const eventBus = { publish: vi.fn() } as unknown as EventBus;
 
@@ -161,7 +169,7 @@ describe("Product Lifecycle Integration", () => {
     store.attributes.clear();
   });
 
-  it("deve completar o fluxo: criar >> adicionar categoria >> adicionar atributo >> ativar >> arquivar", async () => {
+  it("deve completar o fluxo: criar → adicionar categoria → adicionar atributo → ativar → arquivar", async () => {
     const created = await createHandler.execute(
       new CreateProductCommand("Camiseta", "Algodão"),
     );

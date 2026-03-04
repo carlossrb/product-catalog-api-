@@ -1,46 +1,46 @@
 import { Inject } from "@nestjs/common";
 import { CommandHandler, EventBus, ICommandHandler } from "@nestjs/cqrs";
-import { BadRequestException, Logger, NotFoundException } from "@nestjs/common";
-import { InjectRepository } from "@nestjs/typeorm";
-import { Repository } from "typeorm";
+import { Logger, NotFoundException } from "@nestjs/common";
 import { CACHE_MANAGER, Cache } from "@nestjs/cache-manager";
 import { ArchiveProductCommand } from "../impl/archive-product.command";
 import { Product } from "../../entities/product.entity";
-import { ProductStatus } from "../../entities/product-status.enum";
 import { ProductArchivedEvent } from "../../events/product.events";
 import { CacheKeys } from "../../../../common/cache/cache-keys";
+import {
+  PRODUCT_REPOSITORY,
+  ProductRepositoryPort,
+} from "../../ports/product.repository.port";
 
 @CommandHandler(ArchiveProductCommand)
 export class ArchiveProductHandler implements ICommandHandler<ArchiveProductCommand> {
   private readonly logger = new Logger(ArchiveProductHandler.name);
 
   constructor(
-    @InjectRepository(Product)
-    private readonly productRepository: Repository<Product>,
+    @Inject(PRODUCT_REPOSITORY)
+    private readonly products: ProductRepositoryPort,
     private readonly eventBus: EventBus,
     @Inject(CACHE_MANAGER)
     private readonly cache: Cache,
   ) {}
 
   async execute(command: ArchiveProductCommand): Promise<Product> {
-    const product = await this.productRepository.findOne({
-      where: { id: command.id },
-    });
+    const product = await this.products.findById(command.id);
 
     if (!product) {
       throw new NotFoundException(`Product ${command.id} not found`);
     }
 
-    if (product.status === ProductStatus.ARCHIVED) {
-      throw new BadRequestException("Product is already archived");
-    }
+    product.archive();
 
-    product.status = ProductStatus.ARCHIVED;
-    const saved = await this.productRepository.save(product);
+    const saved = await this.products.save(product);
 
     await this.cache.del(CacheKeys.product(saved.id));
 
-    this.logger.log(`Product archived: ${saved.id} - ${saved.name}`);
+    this.logger.log({
+      action: "archived",
+      productId: saved.id,
+      name: saved.name,
+    });
     this.eventBus.publish(new ProductArchivedEvent(saved.id, saved.name));
 
     return saved;

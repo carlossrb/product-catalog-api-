@@ -24,14 +24,18 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     const message =
       exception instanceof Error ? exception.message : "Internal server error";
 
-    this.logger.error(
-      `Unhandled exception on ${request.method} ${request.url}: ${message}`,
-      exception instanceof Error ? exception.stack : undefined,
-    );
+    this.logger.error({
+      message: "Unhandled exception",
+      method: request.method,
+      path: request.url,
+      error: message,
+      requestId: request.headers["x-request-id"],
+    });
 
     response.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
       statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
       message: "Internal server error",
+      requestId: request.headers["x-request-id"],
       timestamp: new Date().toISOString(),
       path: request.url,
     });

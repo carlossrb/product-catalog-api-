@@ -1,18 +1,20 @@
 import { Inject } from "@nestjs/common";
 import { IQueryHandler, QueryHandler } from "@nestjs/cqrs";
 import { NotFoundException } from "@nestjs/common";
-import { InjectRepository } from "@nestjs/typeorm";
-import { Repository } from "typeorm";
 import { CACHE_MANAGER, Cache } from "@nestjs/cache-manager";
 import { GetProductQuery } from "../impl/get-product.query";
 import { Product } from "../../entities/product.entity";
 import { CacheKeys, CacheTTL } from "../../../../common/cache/cache-keys";
+import {
+  PRODUCT_REPOSITORY,
+  ProductRepositoryPort,
+} from "../../ports/product.repository.port";
 
 @QueryHandler(GetProductQuery)
 export class GetProductHandler implements IQueryHandler<GetProductQuery> {
   constructor(
-    @InjectRepository(Product)
-    private readonly productRepository: Repository<Product>,
+    @Inject(PRODUCT_REPOSITORY)
+    private readonly products: ProductRepositoryPort,
     @Inject(CACHE_MANAGER)
     private readonly cache: Cache,
   ) {}
@@ -25,10 +27,10 @@ export class GetProductHandler implements IQueryHandler<GetProductQuery> {
       return cached;
     }
 
-    const product = await this.productRepository.findOne({
-      where: { id: query.id },
-      relations: ["categories", "attributes"],
-    });
+    const product = await this.products.findById(query.id, [
+      "categories",
+      "attributes",
+    ]);
 
     if (!product) {
       throw new NotFoundException(`Product ${query.id} not found`);

@@ -1,75 +1,60 @@
 import { Inject } from "@nestjs/common";
 import { CommandHandler, EventBus, ICommandHandler } from "@nestjs/cqrs";
-import {
-  BadRequestException,
-  ConflictException,
-  Logger,
-  NotFoundException,
-} from "@nestjs/common";
-import { InjectRepository } from "@nestjs/typeorm";
-import { Repository } from "typeorm";
+import { Logger, NotFoundException } from "@nestjs/common";
 import { CACHE_MANAGER, Cache } from "@nestjs/cache-manager";
 import { AddCategoryCommand } from "../impl/add-category.command";
 import { Product } from "../../entities/product.entity";
-import { Category } from "../../../categories/entities/category.entity";
-import { ProductStatus } from "../../entities/product-status.enum";
 import { CategoryAddedToProductEvent } from "../../events/product.events";
 import { CacheKeys } from "../../../../common/cache/cache-keys";
+import {
+  PRODUCT_REPOSITORY,
+  ProductRepositoryPort,
+} from "../../ports/product.repository.port";
+import {
+  CATEGORY_REPOSITORY,
+  CategoryRepositoryPort,
+} from "../../../categories/ports/category.repository.port";
 
 @CommandHandler(AddCategoryCommand)
 export class AddCategoryHandler implements ICommandHandler<AddCategoryCommand> {
   private readonly logger = new Logger(AddCategoryHandler.name);
 
   constructor(
-    @InjectRepository(Product)
-    private readonly productRepository: Repository<Product>,
-    @InjectRepository(Category)
-    private readonly categoryRepository: Repository<Category>,
+    @Inject(PRODUCT_REPOSITORY)
+    private readonly products: ProductRepositoryPort,
+    @Inject(CATEGORY_REPOSITORY)
+    private readonly categories: CategoryRepositoryPort,
     private readonly eventBus: EventBus,
     @Inject(CACHE_MANAGER)
     private readonly cache: Cache,
   ) {}
 
   async execute(command: AddCategoryCommand): Promise<Product> {
-    const product = await this.productRepository.findOne({
-      where: { id: command.productId },
-      relations: ["categories"],
-    });
+    const product = await this.products.findById(command.productId, [
+      "categories",
+    ]);
 
     if (!product) {
       throw new NotFoundException(`Product ${command.productId} not found`);
     }
 
-    if (product.status === ProductStatus.ARCHIVED) {
-      throw new BadRequestException(
-        "Cannot modify categories of an archived product",
-      );
-    }
-
-    const category = await this.categoryRepository.findOne({
-      where: { id: command.categoryId },
-    });
+    const category = await this.categories.findById(command.categoryId);
 
     if (!category) {
       throw new NotFoundException(`Category ${command.categoryId} not found`);
     }
 
-    const alreadyAssociated = product.categories.some(
-      (c) => c.id === command.categoryId,
-    );
+    product.addCategory(category);
 
-    if (alreadyAssociated) {
-      throw new ConflictException(
-        "Category is already associated with this product",
-      );
-    }
-
-    product.categories.push(category);
-    const saved = await this.productRepository.save(product);
+    const saved = await this.products.save(product);
 
     await this.cache.del(CacheKeys.product(product.id));
 
-    this.logger.log(`Category ${category.id} added to product ${product.id}`);
+    this.logger.log({
+      action: "category_added",
+      productId: product.id,
+      categoryId: category.id,
+    });
     this.eventBus.publish(
       new CategoryAddedToProductEvent(product.id, category.id, category.name),
     );

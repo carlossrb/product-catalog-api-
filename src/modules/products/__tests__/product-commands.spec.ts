@@ -6,7 +6,6 @@ import {
   ConflictException,
   NotFoundException,
 } from "@nestjs/common";
-import { Repository } from "typeorm";
 import { CreateProductHandler } from "../commands/handlers/create-product.handler";
 import { CreateProductCommand } from "../commands/impl/create-product.command";
 import { UpdateProductHandler } from "../commands/handlers/update-product.handler";
@@ -29,37 +28,58 @@ import { Product } from "../entities/product.entity";
 import { ProductAttribute } from "../entities/product-attribute.entity";
 import { ProductStatus } from "../entities/product-status.enum";
 import { Category } from "../../categories/entities/category.entity";
+import { ProductRepositoryPort } from "../ports/product.repository.port";
+import { ProductAttributeRepositoryPort } from "../ports/product-attribute.repository.port";
+import { CategoryRepositoryPort } from "../../categories/ports/category.repository.port";
 
-const mockRepository = <T extends object>() =>
-  ({
-    create: vi.fn(),
-    save: vi.fn(),
-    findOne: vi.fn(),
-    findAndCount: vi.fn(),
-    remove: vi.fn(),
-  }) as unknown as Repository<T>;
+const mockProductRepo = (): ProductRepositoryPort => ({
+  create: vi.fn(),
+  save: vi.fn(),
+  findById: vi.fn(),
+  findDuplicateName: vi.fn(),
+  findAll: vi.fn(),
+});
+
+const mockAttrRepo = (): ProductAttributeRepositoryPort => ({
+  create: vi.fn(),
+  save: vi.fn(),
+  findByProductAndId: vi.fn(),
+  findByProductAndKey: vi.fn(),
+  remove: vi.fn(),
+});
+
+const mockCategoryRepo = (): CategoryRepositoryPort => ({
+  create: vi.fn(),
+  save: vi.fn(),
+  findById: vi.fn(),
+  findByName: vi.fn(),
+  findByNameExcluding: vi.fn(),
+  findAll: vi.fn(),
+});
 
 const mockEventBus = () => ({ publish: vi.fn() }) as unknown as EventBus;
 
-const mockCacheManager = () =>
+const mockCache = () =>
   ({
     get: vi.fn().mockResolvedValue(null),
     set: vi.fn().mockResolvedValue(undefined),
     del: vi.fn().mockResolvedValue(undefined),
   }) as unknown as Cache;
 
-const buildProduct = (overrides: Partial<Product> = {}): Product =>
-  ({
+const buildProduct = (overrides: Partial<Product> = {}): Product => {
+  const p = Object.assign(new Product(), {
     id: "prod-1",
     name: "Camiseta",
     description: null,
     status: ProductStatus.DRAFT,
-    categories: [],
-    attributes: [],
+    categories: [] as Category[],
+    attributes: [] as ProductAttribute[],
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
-  }) as Product;
+  });
+  return p;
+};
 
 const buildCategory = (overrides: Partial<Category> = {}): Category =>
   ({
@@ -81,24 +101,24 @@ const buildAttribute = (
   }) as ProductAttribute;
 
 describe("CreateProductHandler", () => {
-  const productRepo = mockRepository<Product>();
+  const repo = mockProductRepo();
   const eventBus = mockEventBus();
-  const cache = mockCacheManager();
-  const handler = new CreateProductHandler(productRepo, eventBus, cache);
+  const cache = mockCache();
+  const handler = new CreateProductHandler(repo, eventBus, cache);
 
   beforeEach(() => vi.clearAllMocks());
 
   it("deve criar produto com status DRAFT", async () => {
     const saved = buildProduct();
-    vi.mocked(productRepo.create).mockReturnValue(saved);
-    vi.mocked(productRepo.save).mockResolvedValue(saved);
+    vi.mocked(repo.create).mockReturnValue(saved);
+    vi.mocked(repo.save).mockResolvedValue(saved);
 
     const result = await handler.execute(
       new CreateProductCommand("Camiseta", null),
     );
 
     expect(result.status).toBe(ProductStatus.DRAFT);
-    expect(productRepo.create).toHaveBeenCalledWith({
+    expect(repo.create).toHaveBeenCalledWith({
       name: "Camiseta",
       description: null,
     });
@@ -107,8 +127,8 @@ describe("CreateProductHandler", () => {
 
   it("deve criar produto com descrição", async () => {
     const saved = buildProduct({ description: "Algodão 100%" });
-    vi.mocked(productRepo.create).mockReturnValue(saved);
-    vi.mocked(productRepo.save).mockResolvedValue(saved);
+    vi.mocked(repo.create).mockReturnValue(saved);
+    vi.mocked(repo.save).mockResolvedValue(saved);
 
     const result = await handler.execute(
       new CreateProductCommand("Camiseta", "Algodão 100%"),
@@ -119,17 +139,17 @@ describe("CreateProductHandler", () => {
 });
 
 describe("UpdateProductHandler", () => {
-  const productRepo = mockRepository<Product>();
+  const repo = mockProductRepo();
   const eventBus = mockEventBus();
-  const cache = mockCacheManager();
-  const handler = new UpdateProductHandler(productRepo, eventBus, cache);
+  const cache = mockCache();
+  const handler = new UpdateProductHandler(repo, eventBus, cache);
 
   beforeEach(() => vi.clearAllMocks());
 
   it("deve atualizar nome e descrição de produto DRAFT", async () => {
     const product = buildProduct();
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(productRepo.save).mockResolvedValue({
+    vi.mocked(repo.findById).mockResolvedValue(product);
+    vi.mocked(repo.save).mockResolvedValue({
       ...product,
       name: "Premium",
       description: "Nova",
@@ -139,14 +159,14 @@ describe("UpdateProductHandler", () => {
       new UpdateProductCommand("prod-1", "Premium", "Nova"),
     );
 
-    expect(productRepo.save).toHaveBeenCalled();
+    expect(repo.save).toHaveBeenCalled();
     expect(eventBus.publish).toHaveBeenCalledOnce();
   });
 
   it("deve permitir atualizar apenas descrição de produto ARCHIVED", async () => {
     const product = buildProduct({ status: ProductStatus.ARCHIVED });
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(productRepo.save).mockResolvedValue({
+    vi.mocked(repo.findById).mockResolvedValue(product);
+    vi.mocked(repo.save).mockResolvedValue({
       ...product,
       description: "Atualizada",
     } as Product);
@@ -155,12 +175,12 @@ describe("UpdateProductHandler", () => {
       new UpdateProductCommand("prod-1", undefined, "Atualizada"),
     );
 
-    expect(productRepo.save).toHaveBeenCalled();
+    expect(repo.save).toHaveBeenCalled();
   });
 
   it("deve rejeitar alteração de nome em produto ARCHIVED", async () => {
     const product = buildProduct({ status: ProductStatus.ARCHIVED });
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
+    vi.mocked(repo.findById).mockResolvedValue(product);
 
     await expect(
       handler.execute(new UpdateProductCommand("prod-1", "Novo Nome")),
@@ -168,7 +188,7 @@ describe("UpdateProductHandler", () => {
   });
 
   it("deve lançar NotFoundException quando produto não existe", async () => {
-    vi.mocked(productRepo.findOne).mockResolvedValue(null);
+    vi.mocked(repo.findById).mockResolvedValue(null);
 
     await expect(
       handler.execute(new UpdateProductCommand("inexistente", "Nome")),
@@ -177,21 +197,21 @@ describe("UpdateProductHandler", () => {
 
   it("deve retornar produto sem salvar quando não há alterações", async () => {
     const product = buildProduct();
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
+    vi.mocked(repo.findById).mockResolvedValue(product);
 
     const result = await handler.execute(new UpdateProductCommand("prod-1"));
 
     expect(result).toBe(product);
-    expect(productRepo.save).not.toHaveBeenCalled();
+    expect(repo.save).not.toHaveBeenCalled();
     expect(eventBus.publish).not.toHaveBeenCalled();
   });
 });
 
 describe("ActivateProductHandler", () => {
-  const productRepo = mockRepository<Product>();
+  const repo = mockProductRepo();
   const eventBus = mockEventBus();
-  const cache = mockCacheManager();
-  const handler = new ActivateProductHandler(productRepo, eventBus, cache);
+  const cache = mockCache();
+  const handler = new ActivateProductHandler(repo, eventBus, cache);
 
   beforeEach(() => vi.clearAllMocks());
 
@@ -201,10 +221,9 @@ describe("ActivateProductHandler", () => {
       attributes: [buildAttribute()],
     });
 
-    vi.mocked(productRepo.findOne)
-      .mockResolvedValueOnce(product)
-      .mockResolvedValueOnce(null);
-    vi.mocked(productRepo.save).mockResolvedValue({
+    vi.mocked(repo.findById).mockResolvedValue(product);
+    vi.mocked(repo.findDuplicateName).mockResolvedValue(null);
+    vi.mocked(repo.save).mockResolvedValue({
       ...product,
       status: ProductStatus.ACTIVE,
     } as Product);
@@ -217,7 +236,7 @@ describe("ActivateProductHandler", () => {
 
   it("deve rejeitar ativação de produto ARCHIVED", async () => {
     const product = buildProduct({ status: ProductStatus.ARCHIVED });
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
+    vi.mocked(repo.findById).mockResolvedValue(product);
 
     await expect(
       handler.execute(new ActivateProductCommand("prod-1")),
@@ -226,7 +245,7 @@ describe("ActivateProductHandler", () => {
 
   it("deve rejeitar ativação de produto já ACTIVE", async () => {
     const product = buildProduct({ status: ProductStatus.ACTIVE });
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
+    vi.mocked(repo.findById).mockResolvedValue(product);
 
     await expect(
       handler.execute(new ActivateProductCommand("prod-1")),
@@ -239,9 +258,8 @@ describe("ActivateProductHandler", () => {
       attributes: [buildAttribute()],
     });
 
-    vi.mocked(productRepo.findOne)
-      .mockResolvedValueOnce(product)
-      .mockResolvedValueOnce(null);
+    vi.mocked(repo.findById).mockResolvedValue(product);
+    vi.mocked(repo.findDuplicateName).mockResolvedValue(null);
 
     await expect(
       handler.execute(new ActivateProductCommand("prod-1")),
@@ -254,9 +272,8 @@ describe("ActivateProductHandler", () => {
       attributes: [],
     });
 
-    vi.mocked(productRepo.findOne)
-      .mockResolvedValueOnce(product)
-      .mockResolvedValueOnce(null);
+    vi.mocked(repo.findById).mockResolvedValue(product);
+    vi.mocked(repo.findDuplicateName).mockResolvedValue(null);
 
     await expect(
       handler.execute(new ActivateProductCommand("prod-1")),
@@ -270,9 +287,8 @@ describe("ActivateProductHandler", () => {
     });
     const duplicate = buildProduct({ id: "prod-2" });
 
-    vi.mocked(productRepo.findOne)
-      .mockResolvedValueOnce(product)
-      .mockResolvedValueOnce(duplicate);
+    vi.mocked(repo.findById).mockResolvedValue(product);
+    vi.mocked(repo.findDuplicateName).mockResolvedValue(duplicate);
 
     await expect(
       handler.execute(new ActivateProductCommand("prod-1")),
@@ -283,9 +299,8 @@ describe("ActivateProductHandler", () => {
     const product = buildProduct({ categories: [], attributes: [] });
     const duplicate = buildProduct({ id: "prod-2" });
 
-    vi.mocked(productRepo.findOne)
-      .mockResolvedValueOnce(product)
-      .mockResolvedValueOnce(duplicate);
+    vi.mocked(repo.findById).mockResolvedValue(product);
+    vi.mocked(repo.findDuplicateName).mockResolvedValue(duplicate);
 
     try {
       await handler.execute(new ActivateProductCommand("prod-1"));
@@ -300,7 +315,7 @@ describe("ActivateProductHandler", () => {
   });
 
   it("deve lançar NotFoundException quando produto não existe", async () => {
-    vi.mocked(productRepo.findOne).mockResolvedValue(null);
+    vi.mocked(repo.findById).mockResolvedValue(null);
 
     await expect(
       handler.execute(new ActivateProductCommand("inexistente")),
@@ -309,17 +324,17 @@ describe("ActivateProductHandler", () => {
 });
 
 describe("ArchiveProductHandler", () => {
-  const productRepo = mockRepository<Product>();
+  const repo = mockProductRepo();
   const eventBus = mockEventBus();
-  const cache = mockCacheManager();
-  const handler = new ArchiveProductHandler(productRepo, eventBus, cache);
+  const cache = mockCache();
+  const handler = new ArchiveProductHandler(repo, eventBus, cache);
 
   beforeEach(() => vi.clearAllMocks());
 
   it("deve arquivar produto DRAFT", async () => {
     const product = buildProduct();
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(productRepo.save).mockResolvedValue({
+    vi.mocked(repo.findById).mockResolvedValue(product);
+    vi.mocked(repo.save).mockResolvedValue({
       ...product,
       status: ProductStatus.ARCHIVED,
     } as Product);
@@ -332,8 +347,8 @@ describe("ArchiveProductHandler", () => {
 
   it("deve arquivar produto ACTIVE", async () => {
     const product = buildProduct({ status: ProductStatus.ACTIVE });
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(productRepo.save).mockResolvedValue({
+    vi.mocked(repo.findById).mockResolvedValue(product);
+    vi.mocked(repo.save).mockResolvedValue({
       ...product,
       status: ProductStatus.ARCHIVED,
     } as Product);
@@ -345,7 +360,7 @@ describe("ArchiveProductHandler", () => {
 
   it("deve rejeitar produto já ARCHIVED", async () => {
     const product = buildProduct({ status: ProductStatus.ARCHIVED });
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
+    vi.mocked(repo.findById).mockResolvedValue(product);
 
     await expect(
       handler.execute(new ArchiveProductCommand("prod-1")),
@@ -353,7 +368,7 @@ describe("ArchiveProductHandler", () => {
   });
 
   it("deve lançar NotFoundException quando produto não existe", async () => {
-    vi.mocked(productRepo.findOne).mockResolvedValue(null);
+    vi.mocked(repo.findById).mockResolvedValue(null);
 
     await expect(
       handler.execute(new ArchiveProductCommand("inexistente")),
@@ -362,10 +377,10 @@ describe("ArchiveProductHandler", () => {
 });
 
 describe("AddCategoryHandler", () => {
-  const productRepo = mockRepository<Product>();
-  const categoryRepo = mockRepository<Category>();
+  const productRepo = mockProductRepo();
+  const categoryRepo = mockCategoryRepo();
   const eventBus = mockEventBus();
-  const cache = mockCacheManager();
+  const cache = mockCache();
   const handler = new AddCategoryHandler(
     productRepo,
     categoryRepo,
@@ -379,8 +394,8 @@ describe("AddCategoryHandler", () => {
     const product = buildProduct();
     const category = buildCategory();
 
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(categoryRepo.findOne).mockResolvedValue(category);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
+    vi.mocked(categoryRepo.findById).mockResolvedValue(category);
     vi.mocked(productRepo.save).mockResolvedValue(product);
 
     await handler.execute(new AddCategoryCommand("prod-1", "cat-1"));
@@ -391,7 +406,9 @@ describe("AddCategoryHandler", () => {
 
   it("deve rejeitar quando produto é ARCHIVED", async () => {
     const product = buildProduct({ status: ProductStatus.ARCHIVED });
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
+    const category = buildCategory();
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
+    vi.mocked(categoryRepo.findById).mockResolvedValue(category);
 
     await expect(
       handler.execute(new AddCategoryCommand("prod-1", "cat-1")),
@@ -399,7 +416,7 @@ describe("AddCategoryHandler", () => {
   });
 
   it("deve rejeitar quando produto não existe", async () => {
-    vi.mocked(productRepo.findOne).mockResolvedValue(null);
+    vi.mocked(productRepo.findById).mockResolvedValue(null);
 
     await expect(
       handler.execute(new AddCategoryCommand("inexistente", "cat-1")),
@@ -408,8 +425,8 @@ describe("AddCategoryHandler", () => {
 
   it("deve rejeitar quando categoria não existe", async () => {
     const product = buildProduct();
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(categoryRepo.findOne).mockResolvedValue(null);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
+    vi.mocked(categoryRepo.findById).mockResolvedValue(null);
 
     await expect(
       handler.execute(new AddCategoryCommand("prod-1", "inexistente")),
@@ -420,8 +437,8 @@ describe("AddCategoryHandler", () => {
     const category = buildCategory();
     const product = buildProduct({ categories: [category] });
 
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(categoryRepo.findOne).mockResolvedValue(category);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
+    vi.mocked(categoryRepo.findById).mockResolvedValue(category);
 
     await expect(
       handler.execute(new AddCategoryCommand("prod-1", "cat-1")),
@@ -430,10 +447,10 @@ describe("AddCategoryHandler", () => {
 });
 
 describe("RemoveCategoryHandler", () => {
-  const productRepo = mockRepository<Product>();
+  const repo = mockProductRepo();
   const eventBus = mockEventBus();
-  const cache = mockCacheManager();
-  const handler = new RemoveCategoryHandler(productRepo, eventBus, cache);
+  const cache = mockCache();
+  const handler = new RemoveCategoryHandler(repo, eventBus, cache);
 
   beforeEach(() => vi.clearAllMocks());
 
@@ -441,18 +458,18 @@ describe("RemoveCategoryHandler", () => {
     const category = buildCategory();
     const product = buildProduct({ categories: [category] });
 
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(productRepo.save).mockResolvedValue(product);
+    vi.mocked(repo.findById).mockResolvedValue(product);
+    vi.mocked(repo.save).mockResolvedValue(product);
 
     await handler.execute(new RemoveCategoryCommand("prod-1", "cat-1"));
 
-    expect(productRepo.save).toHaveBeenCalled();
+    expect(repo.save).toHaveBeenCalled();
     expect(eventBus.publish).toHaveBeenCalledOnce();
   });
 
   it("deve rejeitar quando produto é ARCHIVED", async () => {
     const product = buildProduct({ status: ProductStatus.ARCHIVED });
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
+    vi.mocked(repo.findById).mockResolvedValue(product);
 
     await expect(
       handler.execute(new RemoveCategoryCommand("prod-1", "cat-1")),
@@ -461,19 +478,19 @@ describe("RemoveCategoryHandler", () => {
 
   it("deve rejeitar quando categoria não está associada", async () => {
     const product = buildProduct();
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
+    vi.mocked(repo.findById).mockResolvedValue(product);
 
     await expect(
       handler.execute(new RemoveCategoryCommand("prod-1", "cat-x")),
-    ).rejects.toThrow(NotFoundException);
+    ).rejects.toThrow(BadRequestException);
   });
 });
 
 describe("AddAttributeHandler", () => {
-  const productRepo = mockRepository<Product>();
-  const attrRepo = mockRepository<ProductAttribute>();
+  const productRepo = mockProductRepo();
+  const attrRepo = mockAttrRepo();
   const eventBus = mockEventBus();
-  const cache = mockCacheManager();
+  const cache = mockCache();
   const handler = new AddAttributeHandler(
     productRepo,
     attrRepo,
@@ -487,8 +504,8 @@ describe("AddAttributeHandler", () => {
     const product = buildProduct();
     const saved = buildAttribute();
 
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(attrRepo.findOne).mockResolvedValue(null);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
+    vi.mocked(attrRepo.findByProductAndKey).mockResolvedValue(null);
     vi.mocked(attrRepo.create).mockReturnValue(saved);
     vi.mocked(attrRepo.save).mockResolvedValue(saved);
 
@@ -502,7 +519,7 @@ describe("AddAttributeHandler", () => {
 
   it("deve rejeitar quando produto é ARCHIVED", async () => {
     const product = buildProduct({ status: ProductStatus.ARCHIVED });
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
 
     await expect(
       handler.execute(new AddAttributeCommand("prod-1", "cor", "azul")),
@@ -513,8 +530,8 @@ describe("AddAttributeHandler", () => {
     const product = buildProduct();
     const existing = buildAttribute();
 
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(attrRepo.findOne).mockResolvedValue(existing);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
+    vi.mocked(attrRepo.findByProductAndKey).mockResolvedValue(existing);
 
     await expect(
       handler.execute(new AddAttributeCommand("prod-1", "cor", "verde")),
@@ -522,7 +539,7 @@ describe("AddAttributeHandler", () => {
   });
 
   it("deve rejeitar quando produto não existe", async () => {
-    vi.mocked(productRepo.findOne).mockResolvedValue(null);
+    vi.mocked(productRepo.findById).mockResolvedValue(null);
 
     await expect(
       handler.execute(new AddAttributeCommand("inexistente", "cor", "azul")),
@@ -531,10 +548,10 @@ describe("AddAttributeHandler", () => {
 });
 
 describe("UpdateAttributeHandler", () => {
-  const productRepo = mockRepository<Product>();
-  const attrRepo = mockRepository<ProductAttribute>();
+  const productRepo = mockProductRepo();
+  const attrRepo = mockAttrRepo();
   const eventBus = mockEventBus();
-  const cache = mockCacheManager();
+  const cache = mockCache();
   const handler = new UpdateAttributeHandler(
     productRepo,
     attrRepo,
@@ -548,8 +565,8 @@ describe("UpdateAttributeHandler", () => {
     const product = buildProduct();
     const attr = buildAttribute();
 
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(attrRepo.findOne).mockResolvedValue(attr);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
+    vi.mocked(attrRepo.findByProductAndId).mockResolvedValue(attr);
     vi.mocked(attrRepo.save).mockResolvedValue({
       ...attr,
       value: "verde",
@@ -567,8 +584,8 @@ describe("UpdateAttributeHandler", () => {
     const product = buildProduct();
     const attr = buildAttribute();
 
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(attrRepo.findOne).mockResolvedValue(attr);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
+    vi.mocked(attrRepo.findByProductAndId).mockResolvedValue(attr);
     vi.mocked(attrRepo.save).mockResolvedValue({
       ...attr,
       key: "tamanho",
@@ -586,8 +603,8 @@ describe("UpdateAttributeHandler", () => {
     const product = buildProduct();
     const attr = buildAttribute();
 
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(attrRepo.findOne).mockResolvedValue(attr);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
+    vi.mocked(attrRepo.findByProductAndId).mockResolvedValue(attr);
 
     const result = await handler.execute(
       new UpdateAttributeCommand("prod-1", "attr-1"),
@@ -599,7 +616,7 @@ describe("UpdateAttributeHandler", () => {
 
   it("deve rejeitar quando produto é ARCHIVED", async () => {
     const product = buildProduct({ status: ProductStatus.ARCHIVED });
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
 
     await expect(
       handler.execute(
@@ -610,8 +627,8 @@ describe("UpdateAttributeHandler", () => {
 
   it("deve rejeitar quando atributo não existe", async () => {
     const product = buildProduct();
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(attrRepo.findOne).mockResolvedValue(null);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
+    vi.mocked(attrRepo.findByProductAndId).mockResolvedValue(null);
 
     await expect(
       handler.execute(
@@ -622,10 +639,10 @@ describe("UpdateAttributeHandler", () => {
 });
 
 describe("RemoveAttributeHandler", () => {
-  const productRepo = mockRepository<Product>();
-  const attrRepo = mockRepository<ProductAttribute>();
+  const productRepo = mockProductRepo();
+  const attrRepo = mockAttrRepo();
   const eventBus = mockEventBus();
-  const cache = mockCacheManager();
+  const cache = mockCache();
   const handler = new RemoveAttributeHandler(
     productRepo,
     attrRepo,
@@ -639,8 +656,8 @@ describe("RemoveAttributeHandler", () => {
     const product = buildProduct();
     const attr = buildAttribute();
 
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(attrRepo.findOne).mockResolvedValue(attr);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
+    vi.mocked(attrRepo.findByProductAndId).mockResolvedValue(attr);
     vi.mocked(attrRepo.remove).mockResolvedValue(attr);
 
     await handler.execute(new RemoveAttributeCommand("prod-1", "attr-1"));
@@ -651,7 +668,7 @@ describe("RemoveAttributeHandler", () => {
 
   it("deve rejeitar quando produto é ARCHIVED", async () => {
     const product = buildProduct({ status: ProductStatus.ARCHIVED });
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
 
     await expect(
       handler.execute(new RemoveAttributeCommand("prod-1", "attr-1")),
@@ -660,8 +677,8 @@ describe("RemoveAttributeHandler", () => {
 
   it("deve rejeitar quando atributo não existe", async () => {
     const product = buildProduct();
-    vi.mocked(productRepo.findOne).mockResolvedValue(product);
-    vi.mocked(attrRepo.findOne).mockResolvedValue(null);
+    vi.mocked(productRepo.findById).mockResolvedValue(product);
+    vi.mocked(attrRepo.findByProductAndId).mockResolvedValue(null);
 
     await expect(
       handler.execute(new RemoveAttributeCommand("prod-1", "inexistente")),
@@ -669,7 +686,7 @@ describe("RemoveAttributeHandler", () => {
   });
 
   it("deve rejeitar quando produto não existe", async () => {
-    vi.mocked(productRepo.findOne).mockResolvedValue(null);
+    vi.mocked(productRepo.findById).mockResolvedValue(null);
 
     await expect(
       handler.execute(new RemoveAttributeCommand("inexistente", "attr-1")),
